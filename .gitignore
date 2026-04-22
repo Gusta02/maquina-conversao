@@ -1,0 +1,17 @@
+# Ambientes Virtuais
+venv/
+.env
+
+# Cache de Python
+__pycache__/
+*.py[cod]
+
+# Pastas de Mídia (Assets e Temporários)
+assets/
+outputs/
+logs/
+tmp/
+
+# Configurações de IDE
+.vscode/
+.idea/
