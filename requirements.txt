@@ -4,3 +4,5 @@ python-dotenv
 edge-tts
 mutagen
 pydantic
+groq
+moviepy
