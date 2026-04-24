@@ -1,8 +1,19 @@
 import os
 import logging
 from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips, TextClip, CompositeVideoClip, CompositeAudioClip, afx
+from proglog import ProgressBarLogger
 
 logger = logging.getLogger("app_logger")
+
+class CancelableLogger(ProgressBarLogger):
+    def __init__(self, cancel_callback):
+        super().__init__()
+        self.cancel_callback = cancel_callback
+
+    def callback(self, **kw):
+        # A cada frame renderizado, ele pergunta: "O chefe mandou parar?"
+        if self.cancel_callback and self.cancel_callback():
+            raise Exception("CANCELADO_PELO_USUARIO")
 
 class VideoEngine:
     def __init__(self):
@@ -48,7 +59,7 @@ class VideoEngine:
             logger.error(f"Erro ao preparar clipe com legenda {video_path}: {e}")
             return None
 
-    def render_timeline(self, processed_scenes: list, output_dir: str, theme_slug: str) -> dict:
+    def render_timeline(self, processed_scenes: list, output_dir: str, theme_slug: str, cancel_check=None) -> dict:
         logger.info("Iniciando a montagem da Timeline com Legendas...")
         clips_to_join = []
         
@@ -98,8 +109,10 @@ class VideoEngine:
         output_file = os.path.join(output_dir, f"{theme_slug}_FINAL.mp4")
         logger.info(f"Iniciando renderização de {output_file}...")
 
+        # Instancia o nosso logger espião
+        spy_logger = CancelableLogger(cancel_check) if cancel_check else None
+
         try:
-            # Opção de Teste na CPU (libx264)
             final_video.write_videofile(
                 output_file,
                 fps=30,
@@ -107,7 +120,7 @@ class VideoEngine:
                 audio_codec="aac",
                 preset="ultrafast",
                 threads=4,
-                logger=None
+                logger=spy_logger # <-- Injeta ele aqui (substitua o logger=None)
             )
 
             # OPÇÃO 2: MODO PRODUÇÃO (Sua máquina Ryzen 7 + RX 7650 XT)
@@ -118,19 +131,22 @@ class VideoEngine:
             #     codec="h264_amf",   # <--- A mágica da aceleração da placa AMD!
             #     audio_codec="aac",
             #     preset="fast",
-            #     logger=None
+            #     logger=spy_logger
             # )
             
             # =====================================================================
 
-            # Lógica de fechamento seguro...
             final_video.close()
             for c in clips_to_join:
                 c.close()
 
-            logger.info("Renderização concluída com sucesso!")
             return {"status": "success", "file_path": output_file}
 
         except Exception as e:
-            logger.error(f"Erro fatal na renderização final: {e}")
+            # Captura a nossa explosão controlada
+            if str(e) == "CANCELADO_PELO_USUARIO":
+                logger.warning("Renderização abortada com sucesso pelo usuário.")
+                return {"status": "error", "message": "🛑 Operação abortada."}
+                
+            logger.error(f"Erro fatal: {e}")
             return {"status": "error", "message": str(e)}

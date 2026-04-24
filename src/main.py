@@ -1,19 +1,24 @@
 import os
-import logging
+import json
 import shutil
-from fastapi import FastAPI, HTTPException
+import logging
+from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import List, Dict, Any
-from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 
-from src.voice_engine import VoiceEngine
 from src.llm_engine import LLMEngine
-from src.project_manager import ProjectManager
 from src.media_miner import MediaMiner
+from src.voice_engine import VoiceEngine
 from src.video_engine import VideoEngine
+from src.project_manager import ProjectManager
 
 # 1. Carregar Variáveis de Ambiente
 load_dotenv()
+
+# Bandeira global de cancelamento
+CANCEL_REQUESTED = False
 
 # 2. Configuração de Logs Estruturados
 log_dir = os.path.join(os.getcwd(), "logs")
@@ -86,66 +91,68 @@ async def search_media(query: str):
 # --- ROTA 3: MOTOR DE RENDERIZAÇÃO (VOZ + VÍDEO) ---
 @app.post("/v1/video/render")
 async def render_video(payload: RenderRequest):
-    logger.info(f"=== Iniciando Renderização: {payload.theme} ===")
-    
-    paths = project_manager.create_project_structure(payload.theme)
-    processed_scenes = []
+    global CANCEL_REQUESTED
+    CANCEL_REQUESTED = False # Reseta a cada nova chamada
 
-    for scene in payload.scenes:
-        # 1. Gerar Áudio (Régua de tempo)
-        audio_result = await voice_engine.generate_to_path(
-            text=scene.get('narration'), 
-            lang=payload.lang,
-            target_dir=paths["audio"],
-            scene_id=scene.get('id')
-        )
+    def is_cancelled():
+        return CANCEL_REQUESTED
+
+    async def event_generator():
+        yield json.dumps({"status": "info", "message": "📦 Iniciando processo..."}) + "\n"
+        paths = project_manager.create_project_structure(payload.theme)
+        processed_scenes = []
+
+        for i, scene in enumerate(payload.scenes):
+            # Trava de segurança 1: Checa antes de cada cena
+            if is_cancelled():
+                yield json.dumps({"status": "error", "message": "🛑 Cancelado antes de processar mídias."}) + "\n"
+                return
+
+            yield json.dumps({"status": "info", "message": f"🎙️ Gerando cena {i+1}..."}) + "\n"
+            audio_result = await voice_engine.generate_to_path(scene.get('narration'), payload.lang, paths["audio"], scene.get('id'))
+
+            selected_url = scene.get('selected_video_url')
+            if selected_url:
+                video_result = media_miner.download_by_url(selected_url, paths["video"], scene.get('id'))
+            else:
+                video_result = media_miner.download_video(scene.get('search_query'), paths["video"], scene.get('id'))
+
+            scene['audio_file'] = audio_result['file_path']
+            scene['duration'] = audio_result['duration_seconds']
+            scene['video_file'] = video_result.get('file_path')
+            processed_scenes.append(scene)
+
+        # Trava de segurança 2: Checa antes de mandar pro FFmpeg
+        if is_cancelled():
+             yield json.dumps({"status": "error", "message": "🛑 Cancelado antes da montagem."}) + "\n"
+             return
+
+        yield json.dumps({"status": "info", "message": "🎬 Montando Timeline (Pode cancelar se quiser)..."}) + "\n"
         
-        selected_url = scene.get('selected_video_url')
-        
-        if selected_url:
-            video_result = media_miner.download_by_url(
-                url=selected_url,
-                target_dir=paths["video"],
-                scene_id=scene.get('id')
-            )
-        else:
-            # Caso contrário, fazemos a busca automática (fallback)
-            video_result = media_miner.download_video(
-                query=scene.get('search_query'),
-                target_dir=paths["video"],
-                scene_id=scene.get('id')
-            )
-        
-        # Guardar os caminhos para o montador
-        scene['audio_file'] = audio_result['file_path']
-        scene['duration'] = audio_result['duration_seconds']
-        scene['video_file'] = video_result.get('file_path')
-        processed_scenes.append(scene)
+        # Passa a função espiã para o motor de vídeo
+        render_result = video_engine.render_timeline(processed_scenes, paths["root"], payload.theme, cancel_check=is_cancelled)
 
-    # 3. CHAMADA DO MOTOR DE VÍDEO (A Montagem Real)
-    # Aqui o sistema junta as peças e gera o arquivo FINAL.mp4
-    render_result = video_engine.render_timeline(
-        processed_scenes=processed_scenes,
-        output_dir=paths["root"],
-        theme_slug=payload.theme
-    )
+        if render_result["status"] == "error":
+            yield json.dumps({"status": "error", "message": render_result["message"]}) + "\n"
+            return
 
-    if render_result["status"] == "error":
-        raise HTTPException(status_code=500, detail=render_result["message"])
+        if payload.cleanup:
+            yield json.dumps({"status": "info", "message": "🧹 Limpando arquivos brutos temporários..."}) + "\n"
+            try:
+                import shutil
+                shutil.rmtree(paths["audio"])
+                shutil.rmtree(paths["video"])
+            except Exception as e:
+                pass
 
-    # 4. Cleanup opcional (Deleta os brutos se solicitado)
-    if payload.cleanup:
-        try:
-            # Agora deletamos tanto audio quanto video brutos, mantendo só o FINAL.mp4
-            import shutil
-            shutil.rmtree(paths["audio"])
-            shutil.rmtree(paths["video"])
-            logger.info(f"Cleanup completo para o projeto: {payload.theme}")
-        except Exception as e:
-            logger.warning(f"Falha no cleanup: {e}")
+        yield json.dumps({"status": "success", "message": "✨ Vídeo renderizado com sucesso!", "video_path": render_result["file_path"]}) + "\n"
 
-    return {
-        "status": "success",
-        "message": "Vídeo renderizado com sucesso!",
-        "video_path": render_result["file_path"]
-    }
+    # O FastAPI agora retorna o Stream em vez de um dicionário final
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
+
+@app.post("/v1/video/cancel")
+def cancel_render():
+    global CANCEL_REQUESTED
+    CANCEL_REQUESTED = True
+    logger.info("🚨 SINAL DE CANCELAMENTO RECEBIDO!")
+    return {"status": "success", "message": "Cancelamento ativado."}
