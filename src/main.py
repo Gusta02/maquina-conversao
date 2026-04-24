@@ -77,7 +77,13 @@ async def generate_script(payload: ScriptRequest):
         "data": script_result["data"]
     }
 
-# --- ROTA 2: MOTOR DE RENDERIZAÇÃO (VOZ + VÍDEO) ---
+# --- ROTA 2: Motor de busca de videos ---
+@app.get("/v1/media/search")
+async def search_media(query: str):
+    candidates = media_miner.search_candidates(query)
+    return {"status": "success", "candidates": candidates}
+
+# --- ROTA 3: MOTOR DE RENDERIZAÇÃO (VOZ + VÍDEO) ---
 @app.post("/v1/video/render")
 async def render_video(payload: RenderRequest):
     logger.info(f"=== Iniciando Renderização: {payload.theme} ===")
@@ -94,12 +100,21 @@ async def render_video(payload: RenderRequest):
             scene_id=scene.get('id')
         )
         
-        # 2. Baixar Vídeo (Mídia bruta)
-        video_result = media_miner.download_video(
-            query=scene.get('search_query'),
-            target_dir=paths["video"],
-            scene_id=scene.get('id')
-        )
+        selected_url = scene.get('selected_video_url')
+        
+        if selected_url:
+            video_result = media_miner.download_by_url(
+                url=selected_url,
+                target_dir=paths["video"],
+                scene_id=scene.get('id')
+            )
+        else:
+            # Caso contrário, fazemos a busca automática (fallback)
+            video_result = media_miner.download_video(
+                query=scene.get('search_query'),
+                target_dir=paths["video"],
+                scene_id=scene.get('id')
+            )
         
         # Guardar os caminhos para o montador
         scene['audio_file'] = audio_result['file_path']

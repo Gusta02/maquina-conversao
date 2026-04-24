@@ -84,3 +84,61 @@ class MediaMiner:
         except Exception as e:
             logger.error(f"Erro na API do Pexels: {str(e)}")
             return None
+
+    def search_candidates(self, query: str, per_page: int = 5) -> list:
+        """Retorna uma lista de URLs de vídeos e thumbnails para escolha do usuário."""
+        params = {
+            "query": query,
+            "orientation": "landscape",
+            "per_page": per_page
+        }
+        try:
+            response = requests.get(self.base_url, headers=self.headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            candidates = []
+            for video in data.get("videos", []):
+                video_files = video.get("video_files", [])
+                
+                # Tenta pegar HD primeiro
+                target_link = next((f["link"] for f in video_files if f["quality"] == "hd"), None)
+                
+                # FALLBACK: Se não achar HD, pega o primeiro link disponível na lista para não ficar sem opções
+                if not target_link and video_files:
+                    target_link = video_files[0]["link"]
+
+                if target_link:
+                    candidates.append({
+                        "id": video["id"],
+                        "preview_img": video["image"], 
+                        "video_url": target_link,
+                        "duration": video["duration"]
+                    })
+            return candidates
+        except Exception as e:
+            logger.error(f"Erro na busca de candidatos: {e}")
+            return []
+    
+    def download_by_url(self, url: str, target_dir: str, scene_id: int) -> dict:
+        """
+        Faz o download direto de um vídeo a partir de uma URL já escolhida pelo usuário.
+        """
+        logger.info(f"Baixando vídeo curado manualmente para a Cena {scene_id}...")
+        output_path = os.path.join(target_dir, f"video_scene_{scene_id}.mp4")
+
+        try:
+            response = requests.get(url, stream=True)
+            response.raise_for_status()
+
+            # Escreve o arquivo em chunks para não estourar a RAM
+            with open(output_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            logger.info(f"Vídeo da Cena {scene_id} baixado com sucesso.")
+            return {"status": "success", "file_path": output_path}
+            
+        except Exception as e:
+            logger.error(f"Erro no download direto da cena {scene_id}: {str(e)}")
+            return {"status": "error", "message": str(e)}
